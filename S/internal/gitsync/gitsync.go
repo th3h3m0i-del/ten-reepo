@@ -57,7 +57,7 @@ func Sync(repoPath, logPath string) string {
 	}
 
 	// Bước 3: commit với giờ local.
-	msg := fmt.Sprintf("ś auto-sync %s", time.Now().Local().Format("2006-01-02 15:04:05"))
+	msg := fmt.Sprintf("ś auto-sync %s", localTime().Format("2006-01-02 15:04:05"))
 	if code, _ := run("commit", "-m", msg); code != 0 {
 		writeFailFlag(queueDir, "commit")
 		return fmt.Sprintf("failed: git commit exit=%d", code)
@@ -120,4 +120,16 @@ func clearFlags(dir string) {
 func LogPath(tmpDir string) string {
 	name := fmt.Sprintf("git_sync_%d.log", time.Now().UnixNano())
 	return filepath.Join(tmpDir, name)
+}
+
+// localTime trả về thời gian hiện tại theo timezone Việt Nam (ICT, UTC+7).
+// Trên Termux Go runtime không đọc được /etc/localtime khi chạy từ
+// exec.Command, nên hard-code fallback để commit message đúng giờ local.
+func localTime() time.Time {
+    if tz := os.Getenv("TZ"); tz != "" {
+        if loc, err := time.LoadLocation(tz); err == nil {
+            return time.Now().In(loc)
+        }
+    }
+    return time.Now().In(time.FixedZone("ICT", 7*3600))
 }

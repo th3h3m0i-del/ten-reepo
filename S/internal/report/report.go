@@ -125,6 +125,20 @@ func langTag(lang string) string {
 		return "typescript"
 	case "java":
 		return "java"
+	case "typescript":
+		return "typescript"
+	case "c":
+		return "c"
+	case "cpp":
+		return "cpp"
+	case "rust":
+		return "rust"
+	case "kotlin":
+		return "kotlin"
+	case "swift":
+		return "swift"
+	case "sql":
+		return "sql"
 	default:
 		return ""
 	}
