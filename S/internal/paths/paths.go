@@ -41,6 +41,20 @@ func TmpDir() (string, error) {
 	return dir, nil
 }
 
+// PushQueueDir trả về ~/ten-reepo/tmp/S/push_queue, tạo nếu chưa có.
+// Dùng để lưu flag retry khi push git thất bại.
+func PushQueueDir() (string, error) {
+	h, err := home()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(h, "ten-reepo", "tmp", "S", "push_queue")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("không tạo được push_queue: %w", err)
+	}
+	return dir, nil
+}
+
 // ScriptPath tạo đường dẫn tuyệt đối cho file script mới trong
 // ~/ten-reepo/S/scripts/clip_<timestamp>.<ext>.
 func ScriptPath(ext string) (string, error) {

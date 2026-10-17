@@ -1,7 +1,6 @@
 // Package gitsync tự động commit + push thay đổi trong ~/ten-reepo
-// lên remote. Chạy khi ś được gọi với cờ -g. Mục đích: Bosz không phải
-// chạy git tay trên Termux, nhưng AI vẫn recon được repo qua GitHub.
-// Không dùng --force, không prompt, không đụng credential ngoài env.
+// lên remote. Chạy khi ś được gọi với cờ -g. Có retry queue: nếu push
+// fail, ghi flag vào tmp/S/push_queue/ để lần chạy sau thử lại.
 package gitsync
 
 import (
@@ -14,7 +13,7 @@ import (
 
 // Sync chạy chuỗi: add -A → (nếu có thay đổi) commit → pull --rebase
 // → push trong repoPath. Trả về chuỗi trạng thái ngắn để đưa vào report.
-// Output của git được ghi vào logPath (nằm trong tmp/S).
+// Commit message dùng giờ local, không phải UTC.
 func Sync(repoPath, logPath string) string {
 	logFile, err := os.Create(logPath)
 	if err != nil {
@@ -40,8 +39,13 @@ func Sync(repoPath, logPath string) string {
 		return 0, nil
 	}
 
+	// Đếm số flag retry trước khi push.
+	queueDir := filepath.Join(repoPath, "tmp", "S", "push_queue")
+	retryCount := countFlags(queueDir)
+
 	// Bước 1: stage mọi thay đổi.
 	if code, _ := run("add", "-A"); code != 0 {
+		writeFailFlag(queueDir, "add")
 		return fmt.Sprintf("failed: git add exit=%d", code)
 	}
 
@@ -52,23 +56,64 @@ func Sync(repoPath, logPath string) string {
 		return "skipped: nothing to commit"
 	}
 
-	// Bước 3: commit.
-	msg := fmt.Sprintf("ś auto-sync %s", time.Now().Format("2006-01-02 15:04:05"))
+	// Bước 3: commit với giờ local.
+	msg := fmt.Sprintf("ś auto-sync %s", time.Now().Local().Format("2006-01-02 15:04:05"))
 	if code, _ := run("commit", "-m", msg); code != 0 {
+		writeFailFlag(queueDir, "commit")
 		return fmt.Sprintf("failed: git commit exit=%d", code)
 	}
 
-	// Bước 4: pull --rebase để tránh reject nếu remote có commit mới.
-	// Fail ở đây không chặn push (có thể đang offline nhưng push bằng
-	// credential đã lưu vẫn đi được, hoặc local đã up-to-date).
+	// Bước 4: pull --rebase để tránh reject. Fail không chặn push.
 	run("pull", "--rebase", "origin", "HEAD")
 
 	// Bước 5: push.
 	if code, _ := run("push", "origin", "HEAD"); code != 0 {
+		writeFailFlag(queueDir, "push")
 		return fmt.Sprintf("failed: git push exit=%d", code)
 	}
 
+	// Push thành công: xoá hết flag retry.
+	clearFlags(queueDir)
+
+	if retryCount > 0 {
+		return fmt.Sprintf("pushed (retried %d)", retryCount)
+	}
 	return "pushed"
+}
+
+// countFlags đếm số file flag trong queueDir.
+func countFlags(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".fail" {
+			n++
+		}
+	}
+	return n
+}
+
+// writeFailFlag ghi một file flag đánh dấu lần fail, để lần sau retry.
+func writeFailFlag(dir, reason string) {
+	_ = os.MkdirAll(dir, 0o755)
+	name := fmt.Sprintf("%d_%s.fail", time.Now().UnixNano(), reason)
+	_ = os.WriteFile(filepath.Join(dir, name), []byte(reason), 0o600)
+}
+
+// clearFlags xoá toàn bộ file flag sau khi push thành công.
+func clearFlags(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".fail" {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
 }
 
 // LogPath sinh đường dẫn log cho một lần sync trong tmpDir.
