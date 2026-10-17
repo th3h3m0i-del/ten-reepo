@@ -1,6 +1,8 @@
 // Package gitsync tự động commit + push thay đổi trong ~/ten-reepo
 // lên remote. Chạy khi ś được gọi với cờ -g. Có retry queue: nếu push
 // fail, ghi flag vào tmp/S/push_queue/ để lần chạy sau thử lại.
+// Timezone đã được main.init() set thành ICT, nên time.Now() ở đây
+// trả giờ VN, không cần hàm localTime riêng.
 package gitsync
 
 import (
@@ -9,15 +11,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
+
+	"ten-reepo/S/internal/werr"
 )
 
 // Sync chạy chuỗi: add -A → (nếu có thay đổi) commit → pull --rebase
-// → push trong repoPath. Trả về chuỗi trạng thái ngắn để đưa vào report.
-// Commit message dùng giờ local, không phải UTC.
+// → push trong repoPath. Trả về chuỗi trạng thái ngắn cho report.
 func Sync(repoPath, logPath string) string {
 	logFile, err := os.Create(logPath)
 	if err != nil {
-		return "failed: không mở được log"
+		return werr.Wrap(werr.KindSyncFailed, err, "không mở được log").Error()
 	}
 	defer logFile.Close()
 
@@ -39,40 +42,32 @@ func Sync(repoPath, logPath string) string {
 		return 0, nil
 	}
 
-	// Đếm số flag retry trước khi push.
 	queueDir := filepath.Join(repoPath, "tmp", "S", "push_queue")
 	retryCount := countFlags(queueDir)
 
-	// Bước 1: stage mọi thay đổi.
 	if code, _ := run("add", "-A"); code != 0 {
 		writeFailFlag(queueDir, "add")
 		return fmt.Sprintf("failed: git add exit=%d", code)
 	}
 
-	// Bước 2: kiểm tra có gì staged để commit không.
-	// "git diff --cached --quiet" trả 0 = không có thay đổi staged.
 	checkCmd := exec.Command("git", "-C", repoPath, "diff", "--cached", "--quiet")
 	if checkCmd.Run() == nil {
 		return "skipped: nothing to commit"
 	}
 
-	// Bước 3: commit với giờ local.
-	msg := fmt.Sprintf("ś auto-sync %s", localTime().Format("2006-01-02 15:04:05"))
+	msg := fmt.Sprintf("ś auto-sync %s", time.Now().Format("2006-01-02 15:04:05"))
 	if code, _ := run("commit", "-m", msg); code != 0 {
 		writeFailFlag(queueDir, "commit")
 		return fmt.Sprintf("failed: git commit exit=%d", code)
 	}
 
-	// Bước 4: pull --rebase để tránh reject. Fail không chặn push.
 	run("pull", "--rebase", "origin", "HEAD")
 
-	// Bước 5: push.
 	if code, _ := run("push", "origin", "HEAD"); code != 0 {
 		writeFailFlag(queueDir, "push")
 		return fmt.Sprintf("failed: git push exit=%d", code)
 	}
 
-	// Push thành công: xoá hết flag retry.
 	clearFlags(queueDir)
 
 	if retryCount > 0 {
@@ -81,7 +76,6 @@ func Sync(repoPath, logPath string) string {
 	return "pushed"
 }
 
-// countFlags đếm số file flag trong queueDir.
 func countFlags(dir string) int {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -96,14 +90,12 @@ func countFlags(dir string) int {
 	return n
 }
 
-// writeFailFlag ghi một file flag đánh dấu lần fail, để lần sau retry.
 func writeFailFlag(dir, reason string) {
 	_ = os.MkdirAll(dir, 0o755)
 	name := fmt.Sprintf("%d_%s.fail", time.Now().UnixNano(), reason)
 	_ = os.WriteFile(filepath.Join(dir, name), []byte(reason), 0o600)
 }
 
-// clearFlags xoá toàn bộ file flag sau khi push thành công.
 func clearFlags(dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -120,16 +112,4 @@ func clearFlags(dir string) {
 func LogPath(tmpDir string) string {
 	name := fmt.Sprintf("git_sync_%d.log", time.Now().UnixNano())
 	return filepath.Join(tmpDir, name)
-}
-
-// localTime trả về thời gian hiện tại theo timezone Việt Nam (ICT, UTC+7).
-// Trên Termux Go runtime không đọc được /etc/localtime khi chạy từ
-// exec.Command, nên hard-code fallback để commit message đúng giờ local.
-func localTime() time.Time {
-    if tz := os.Getenv("TZ"); tz != "" {
-        if loc, err := time.LoadLocation(tz); err == nil {
-            return time.Now().In(loc)
-        }
-    }
-    return time.Now().In(time.FixedZone("ICT", 7*3600))
 }

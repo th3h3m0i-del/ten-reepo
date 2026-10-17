@@ -1,5 +1,6 @@
 // Package report dựng chuỗi markdown mô tả kết quả một lần chạy của ś,
-// theo format tương thích harness log (RUN / code run / stdout / stderr / changes).
+// theo format tương thích harness log. Nhận config để lấy ngưỡng
+// max_code_dump và max_output, không hard-code.
 package report
 
 import (
@@ -8,17 +9,13 @@ import (
 	"math"
 	"strings"
 
+	"ten-reepo/S/internal/config"
 	"ten-reepo/S/internal/runner"
 )
 
-const (
-	maxCodeDump = 4096
-	maxOutput   = 10240
-)
-
-// Build trả về markdown hoàn chỉnh cho một Result.
-func Build(r runner.Result) string {
-	truncated := len(r.Stdout) > maxOutput || len(r.Stderr) > maxOutput
+// Build trả về markdown hoàn chỉnh cho một Result với cfg cho ngưỡng.
+func Build(r runner.Result, cfg *config.Config) string {
+	truncated := len(r.Stdout) > cfg.MaxOutput || len(r.Stderr) > cfg.MaxOutput
 
 	var b strings.Builder
 	b.WriteString("## RUN\n\n")
@@ -35,6 +32,9 @@ func Build(r runner.Result) string {
 		"error_hits":         r.ErrorHits,
 		"output_truncated":   truncated,
 	}
+	if r.ErrorKind != "" {
+		meta["error_kind"] = r.ErrorKind
+	}
 	if r.Sync != "" {
 		meta["sync"] = r.Sync
 	}
@@ -44,7 +44,7 @@ func Build(r runner.Result) string {
 	b.WriteString("\n```\n\n")
 
 	b.WriteString("### code run\n\n")
-	if len(r.CodeContent) <= maxCodeDump {
+	if len(r.CodeContent) <= cfg.MaxCodeDump {
 		fence := "```"
 		if strings.Contains(r.CodeContent, "```") {
 			fence = "````"
@@ -57,15 +57,15 @@ func Build(r runner.Result) string {
 		b.WriteString(fence + "\n\n")
 	} else {
 		fmt.Fprintf(&b, "(file dài %d bytes, vượt ngưỡng %d, xem tại `%s`)\n\n",
-			len(r.CodeContent), maxCodeDump, r.ScriptPath)
+			len(r.CodeContent), cfg.MaxCodeDump, r.ScriptPath)
 	}
 
 	b.WriteString("### stdout\n\n```\n")
-	b.WriteString(truncate(r.Stdout, maxOutput))
+	b.WriteString(truncate(r.Stdout, cfg.MaxOutput))
 	b.WriteString("```\n\n")
 
 	b.WriteString("### stderr\n\n```\n")
-	b.WriteString(truncate(r.Stderr, maxOutput))
+	b.WriteString(truncate(r.Stderr, cfg.MaxOutput))
 	b.WriteString("```\n\n")
 
 	b.WriteString("### changes\n\n```\n")
@@ -77,7 +77,7 @@ func Build(r runner.Result) string {
 	return b.String()
 }
 
-// truncate cắt chuỗi nếu dài hơn max, thêm "... (truncated)".
+// truncate cắt chuỗi nếu dài hơn max.
 func truncate(s string, max int) string {
 	if s == "" {
 		return "(không có)\n"
@@ -95,7 +95,7 @@ func truncate(s string, max int) string {
 	return cut + "... (truncated)\n"
 }
 
-// langTag trả về nhãn ngôn ngữ cho code fence trong markdown.
+// langTag trả về nhãn ngôn ngữ cho code fence.
 func langTag(lang string) string {
 	switch lang {
 	case "python":

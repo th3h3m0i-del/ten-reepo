@@ -16,6 +16,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"ten-reepo/S/internal/werr"
 )
 
 // Result chứa toàn bộ thông tin một lần chạy script.
@@ -34,6 +36,7 @@ type Result struct {
 	ErrorHits        int
 	Changes          []string
 	Sync             string   // kết quả git sync; rỗng nếu không dùng -g
+	ErrorKind        string   // loại lỗi theo werr.Kind; rỗng nếu status ok
 }
 
 // runKind phân loại cách chạy.
@@ -175,6 +178,7 @@ func Run(lang, filePath string) Result {
 		res.Stderr = fmt.Sprintf("ngôn ngữ %q chưa được hỗ trợ; file vẫn được lưu", lang)
 		res.ExitCode = 1
 		res.ErrorHits = 1
+		res.ErrorKind = string(werr.KindMissingInterp)
 		return res
 	}
 
@@ -185,6 +189,7 @@ func Run(lang, filePath string) Result {
 		res.Stderr = fmt.Sprintf("không tìm thấy %q trong PATH; file vẫn được lưu", spec.primary)
 		res.ExitCode = 127
 		res.ErrorHits = 1
+		res.ErrorKind = string(werr.KindMissingInterp)
 		return res
 	}
 
@@ -196,6 +201,7 @@ func Run(lang, filePath string) Result {
 			res.Stderr = "bun binary tồn tại nhưng không chạy được (hỏng); file vẫn được lưu"
 			res.ExitCode = 127
 			res.ErrorHits = 1
+			res.ErrorKind = string(werr.KindMissingInterp)
 			return res
 		}
 	}
@@ -284,6 +290,7 @@ func failCompile(res Result, msg string) Result {
 	res.Stderr = msg
 	res.ExitCode = 1
 	res.ErrorHits = 1
+	res.ErrorKind = string(werr.KindSyntax)
 	return res
 }
 
@@ -312,9 +319,11 @@ func execCapture(cmd []string, res Result, stdinData string) Result {
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
 			res.ExitCode = exitErr.ExitCode()
 			res.StatusReason = "nonzero_exit"
+			res.ErrorKind = string(werr.KindRuntime)
 		} else {
 			res.ExitCode = 1
 			res.StatusReason = runErr.Error()
+			res.ErrorKind = string(werr.KindUnknown)
 		}
 	}
 	return res
