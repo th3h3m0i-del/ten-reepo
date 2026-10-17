@@ -40,6 +40,10 @@ func Build(r runner.Result) string {
 		"error_hits":         r.ErrorHits,
 		"output_truncated":   truncated,
 	}
+	// Chỉ thêm field sync nếu có dùng cờ -g.
+	if r.Sync != "" {
+		meta["sync"] = r.Sync
+	}
 	j, _ := json.MarshalIndent(meta, "", "  ")
 	b.WriteString("```json\n")
 	b.Write(j)

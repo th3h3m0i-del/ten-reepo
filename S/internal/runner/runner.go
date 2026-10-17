@@ -27,6 +27,7 @@ type Result struct {
 	StderrTotalLines int
 	ErrorHits        int
 	Changes          []string
+	Sync             string   // kết quả git sync; rỗng nếu không dùng -g
 }
 
 // Run chọn interpreter theo lang, chạy file, capture output và trả Result.

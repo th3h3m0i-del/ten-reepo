@@ -1,2 +1,5 @@
 # Scratch, cache, không đẩy lên git
 tmp/
+
+# Snapshot backup, dung lượng lớn, không đẩy lên git
+backup/S/
