@@ -1,6 +1,5 @@
 // Package report dựng chuỗi markdown mô tả kết quả một lần chạy của ś,
-// theo format tương thích với harness log (RUN / code run / stdout /
-// stderr / changes).
+// theo format tương thích harness log (RUN / code run / stdout / stderr / changes).
 package report
 
 import (
@@ -13,15 +12,11 @@ import (
 )
 
 const (
-	// maxCodeDump: nếu nội dung script ngắn hơn hoặc bằng ngưỡng này thì
-	// dump nguyên vào mục "code run"; dài hơn chỉ ghi path + kích thước.
 	maxCodeDump = 4096
-	// maxOutput: nếu stdout hoặc stderr dài hơn ngưỡng này thì cắt và
-	// set output_truncated = true.
-	maxOutput = 10240
+	maxOutput   = 10240
 )
 
-// Build trả về chuỗi markdown hoàn chỉnh cho một Result.
+// Build trả về markdown hoàn chỉnh cho một Result.
 func Build(r runner.Result) string {
 	truncated := len(r.Stdout) > maxOutput || len(r.Stderr) > maxOutput
 
@@ -40,7 +35,6 @@ func Build(r runner.Result) string {
 		"error_hits":         r.ErrorHits,
 		"output_truncated":   truncated,
 	}
-	// Chỉ thêm field sync nếu có dùng cờ -g.
 	if r.Sync != "" {
 		meta["sync"] = r.Sync
 	}
@@ -83,8 +77,7 @@ func Build(r runner.Result) string {
 	return b.String()
 }
 
-// truncate cắt chuỗi nếu dài hơn max, thêm ghi chú "... (truncated)".
-// Nếu chuỗi rỗng thì trả về "(không có)".
+// truncate cắt chuỗi nếu dài hơn max, thêm "... (truncated)".
 func truncate(s string, max int) string {
 	if s == "" {
 		return "(không có)\n"
@@ -107,8 +100,10 @@ func langTag(lang string) string {
 	switch lang {
 	case "python":
 		return "python"
-	case "javascript", "bun":
+	case "javascript":
 		return "javascript"
+	case "typescript", "deno":
+		return "typescript"
 	case "go":
 		return "go"
 	case "ruby":
@@ -117,16 +112,12 @@ func langTag(lang string) string {
 		return "perl"
 	case "php":
 		return "php"
-	case "lua":
+	case "lua", "luajit":
 		return "lua"
-	case "bash", "zsh", "sh":
+	case "bash", "zsh", "sh", "dash", "fish":
 		return "bash"
-	case "deno":
-		return "typescript"
 	case "java":
 		return "java"
-	case "typescript":
-		return "typescript"
 	case "c":
 		return "c"
 	case "cpp":
@@ -137,8 +128,32 @@ func langTag(lang string) string {
 		return "kotlin"
 	case "swift":
 		return "swift"
+	case "csharp":
+		return "csharp"
 	case "sql":
 		return "sql"
+	case "r":
+		return "r"
+	case "julia":
+		return "julia"
+	case "tcl":
+		return "tcl"
+	case "groovy":
+		return "groovy"
+	case "scala":
+		return "scala"
+	case "erlang":
+		return "erlang"
+	case "crystal":
+		return "crystal"
+	case "nim":
+		return "nim"
+	case "zig":
+		return "zig"
+	case "awk":
+		return "awk"
+	case "bun":
+		return "javascript"
 	default:
 		return ""
 	}

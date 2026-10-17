@@ -1,7 +1,11 @@
-// Package runner chạy file script bằng interpreter tương ứng, capture
-// stdout/stderr song song với in ra terminal, và trả về Result có cấu
-// trúc để package report dựng markdown. Với C/C++/Rust phải compile
-// trước rồi chạy binary, binary tạm nằm trong tmp/S/build/.
+// Package runner chạy file script bằng interpreter/compiler tương ứng,
+// capture stdout/stderr song song với in ra terminal, và trả về Result.
+// Hỗ trợ 3 kiểu chạy:
+//   - trực tiếp qua interpreter (python, node, ruby, bash, java, R, ...)
+//   - compile rồi chạy binary (C, C++, Rust, Kotlin, C#, Zig, Nim, Crystal)
+//   - đặc biệt (awk cần stdin rỗng, sqlite3 cần :memory:, bun báo lỗi nếu hỏng)
+// Ngôn ngữ không có interpreter/compiler: trả unsupported_lang nhưng file
+// script vẫn được giữ, không mất nội dung clipboard.
 package runner
 
 import (
@@ -14,12 +18,12 @@ import (
 	"strings"
 )
 
-// Result chứa toàn bộ thông tin của một lần chạy script.
+// Result chứa toàn bộ thông tin một lần chạy script.
 type Result struct {
 	Status           string   // "ok" | "error"
 	StatusReason     string   // "completed" | "nonzero_exit" | "interpreter_not_found" | "unsupported_lang" | "compile_failed"
 	ExitCode         int
-	Duration         float64  // giây
+	Duration         float64
 	Lang             string
 	ScriptPath       string
 	CodeContent      string
@@ -32,42 +36,171 @@ type Result struct {
 	Sync             string   // kết quả git sync; rỗng nếu không dùng -g
 }
 
-// Run chọn cách chạy theo lang. Python/bash/js chạy trực tiếp qua
-// interpreter. C/C++/Rust compile rồi chạy binary. Ngôn ngữ không hỗ
-// trợ (kotlin, swift, sql) trả lỗi unsupported_lang nhưng KHÔNG xoá
-// file script — nội dung clipboard luôn được giữ lại.
+// runKind phân loại cách chạy.
+type runKind int
+
+const (
+	kindDirect    runKind = iota // chạy thẳng interpreter
+	kindCompile                  // compile rồi chạy binary/jar/exe
+	kindSpecial                  // awk, sqlite cần stdin đặc biệt
+)
+
+// langSpec mô tả cách chạy một ngôn ngữ.
+type langSpec struct {
+	kind runKind
+	// interpreter/compiler đầu tiên (dùng để LookPath)
+	primary string
+	// hàm build commandline (trả về argv) khi chạy hoặc compile
+	build func(filePath, buildDir string) ([]string, error)
+	// hàm build commandline chạy binary sau khi compile
+	runBuilt func(filePath, buildDir string) ([]string, error)
+}
+
+// registry map lang → spec. Ngôn ngữ không có trong map = unsupported.
+var registry = map[string]langSpec{
+	// === Direct interpreters ===
+	"python":     {kindDirect, "python3", single("python3"), nil},
+	"javascript": {kindDirect, "node", single("node"), nil},
+	"typescript": {kindDirect, "deno", argCmd("deno", "run"), nil},
+	"deno":       {kindDirect, "deno", argCmd("deno", "run"), nil},
+	"ruby":       {kindDirect, "ruby", single("ruby"), nil},
+	"perl":       {kindDirect, "perl", single("perl"), nil},
+	"php":        {kindDirect, "php", single("php"), nil},
+	"lua":        {kindDirect, "lua", single("lua"), nil},
+	"luajit":     {kindDirect, "luajit", single("luajit"), nil},
+	"bash":       {kindDirect, "bash", single("bash"), nil},
+	"zsh":        {kindDirect, "zsh", single("zsh"), nil},
+	"sh":         {kindDirect, "sh", single("sh"), nil},
+	"dash":       {kindDirect, "dash", single("dash"), nil},
+	"fish":       {kindDirect, "fish", single("fish"), nil},
+	"java":       {kindDirect, "java", single("java"), nil},
+	"r":          {kindDirect, "Rscript", single("Rscript"), nil},
+	"julia":      {kindDirect, "julia", single("julia"), nil},
+	"tcl":        {kindDirect, "tclsh", single("tclsh"), nil},
+	"groovy":     {kindDirect, "groovy", single("groovy"), nil},
+	"scala":      {kindDirect, "scala", single("scala"), nil},
+	"swift":      {kindDirect, "swift", single("swift"), nil},
+	"erlang":     {kindDirect, "escript", single("escript"), nil},
+	"bun":        {kindDirect, "bun", argCmd("bun", "run"), nil},
+
+	// === Special (cần stdin đặc biệt) ===
+	"awk":    {kindSpecial, "awk", awkCmd, nil},
+	"sql":    {kindSpecial, "sqlite3", sqliteCmd, nil},
+
+	// === Compile rồi chạy ===
+	"c":     {kindCompile, "gcc", compileSimple("gcc"), runBinary},
+	"cpp":   {kindCompile, "g++", compileSimple("g++"), runBinary},
+	"rust":  {kindCompile, "rustc", compileSimple("rustc"), runBinary},
+	"zig":   {kindCompile, "zig", compileSimple("zig"), runBinary},
+	"kotlin": {kindCompile, "kotlinc", compileKotlin, runJar},
+	"csharp": {kindCompile, "csc", compileCSharp, runMono},
+	"crystal": {kindCompile, "crystal", compileCrystal, runBinary},
+	"nim":     {kindCompile, "nim", compileNim, runBinary},
+}
+
+// single trả về builder cho lệnh dạng "<interpreter> <file>".
+func single(bin string) func(string, string) ([]string, error) {
+	return func(fp, _ string) ([]string, error) { return []string{bin, fp}, nil }
+}
+
+// argCmd trả về builder cho lệnh dạng "<bin> <sub> <file>".
+func argCmd(bin, sub string) func(string, string) ([]string, error) {
+	return func(fp, _ string) ([]string, error) { return []string{bin, sub, fp}, nil }
+}
+
+// awkCmd: awk -f <file> < /dev/null.
+func awkCmd(fp, _ string) ([]string, error) { return []string{"awk", "-f", fp}, nil }
+
+// sqliteCmd: sqlite3 :memory: (stdin từ file .sql).
+func sqliteCmd(fp, _ string) ([]string, error) { return []string{"sqlite3", ":memory:"}, nil }
+
+// compileSimple trả về builder compile binary cơ bản: "<cc> <file> -o <bin>".
+func compileSimple(cc string) func(string, string) ([]string, error) {
+	return func(fp, bd string) ([]string, error) {
+		bin := filepath.Join(bd, "out_"+fmt.Sprintf("%d", os.Getpid()))
+		return []string{cc, fp, "-o", bin}, nil
+	}
+}
+
+// compileKotlin: kotlinc -include-runtime -d out.jar.
+func compileKotlin(fp, bd string) ([]string, error) {
+	out := filepath.Join(bd, "out_"+fmt.Sprintf("%d", os.Getpid())+".jar")
+	return []string{"kotlinc", fp, "-include-runtime", "-d", out}, nil
+}
+
+// compileCSharp: csc -out:out.exe.
+func compileCSharp(fp, bd string) ([]string, error) {
+	out := filepath.Join(bd, "out_"+fmt.Sprintf("%d", os.Getpid())+".exe")
+	return []string{"csc", "-out:" + out, fp}, nil
+}
+
+// compileCrystal: crystal build <file> -o <bin>.
+func compileCrystal(fp, bd string) ([]string, error) {
+	bin := filepath.Join(bd, "out_"+fmt.Sprintf("%d", os.Getpid()))
+	return []string{"crystal", "build", fp, "-o", bin}, nil
+}
+
+// compileNim: nim c -o:<bin> --hints:off <file>.
+func compileNim(fp, bd string) ([]string, error) {
+	bin := filepath.Join(bd, "out_"+fmt.Sprintf("%d", os.Getpid()))
+	return []string{"nim", "c", "--hints:off", "-o:" + bin, fp}, nil
+}
+
+// runBinary: chạy binary đã compile (path suy ra từ cùng quy tắc).
+func runBinary(_ string, bd string) ([]string, error) {
+	bin := filepath.Join(bd, "out_"+fmt.Sprintf("%d", os.Getpid()))
+	return []string{bin}, nil
+}
+
+// runJar: java -jar out.jar.
+func runJar(_ string, bd string) ([]string, error) {
+	out := filepath.Join(bd, "out_"+fmt.Sprintf("%d", os.Getpid())+".jar")
+	return []string{"java", "-jar", out}, nil
+}
+
+// runMono: mono out.exe.
+func runMono(_ string, bd string) ([]string, error) {
+	out := filepath.Join(bd, "out_"+fmt.Sprintf("%d", os.Getpid())+".exe")
+	return []string{"mono", out}, nil
+}
+
+// Run chọn cách chạy theo lang và thực thi.
 func Run(lang, filePath string) Result {
 	res := Result{Status: "ok", StatusReason: "completed", ExitCode: 0}
 
-	// Compile-run cho C/C++/Rust.
-	if lang == "c" || lang == "cpp" || lang == "rust" {
-		return runCompiled(lang, filePath, res)
-	}
-
-	cmd, err := commandFor(lang, filePath)
-	if err != nil {
+	spec, ok := registry[lang]
+	if !ok {
 		res.Status = "error"
 		res.StatusReason = "unsupported_lang"
-		res.Stderr = err.Error()
+		res.Stderr = fmt.Sprintf("ngôn ngữ %q chưa được hỗ trợ; file vẫn được lưu", lang)
 		res.ExitCode = 1
 		res.ErrorHits = 1
 		return res
 	}
-	if _, err := exec.LookPath(cmd[0]); err != nil {
+
+	// Kiểm tra interpreter/compiler có trên máy.
+	if _, err := exec.LookPath(spec.primary); err != nil {
 		res.Status = "error"
 		res.StatusReason = "interpreter_not_found"
-		res.Stderr = fmt.Sprintf("không tìm thấy interpreter %q trong PATH", cmd[0])
+		res.Stderr = fmt.Sprintf("không tìm thấy %q trong PATH; file vẫn được lưu", spec.primary)
 		res.ExitCode = 127
 		res.ErrorHits = 1
 		return res
 	}
 
-	return execCapture(cmd, res)
-}
+	// Bun đặc biệt: binary có nhưng có thể hỏng — verify bằng --version.
+	if lang == "bun" {
+		if err := exec.Command("bun", "--version").Run(); err != nil {
+			res.Status = "error"
+			res.StatusReason = "interpreter_not_found"
+			res.Stderr = "bun binary tồn tại nhưng không chạy được (hỏng); file vẫn được lưu"
+			res.ExitCode = 127
+			res.ErrorHits = 1
+			return res
+		}
+	}
 
-// runCompiled xử lý riêng C/C++/Rust: compile → chạy binary.
-// Binary build nằm trong tmp/S/build/, không đụng ngoài scope.
-func runCompiled(lang, filePath string, res Result) Result {
+	// Build dir cho compile target.
 	home, err := os.UserHomeDir()
 	if err != nil {
 		res.Status = "error"
@@ -86,62 +219,84 @@ func runCompiled(lang, filePath string, res Result) Result {
 		res.ErrorHits = 1
 		return res
 	}
-	binPath := filepath.Join(buildDir, "clip_bin_"+fmt.Sprintf("%d", os.Getpid()))
 
-	var compiler []string
-	switch lang {
-	case "c":
-		compiler = []string{"gcc", filePath, "-o", binPath}
-	case "cpp":
-		compiler = []string{"g++", filePath, "-o", binPath}
-	case "rust":
-		compiler = []string{"rustc", filePath, "-o", binPath}
-	default:
-		res.Status = "error"
-		res.StatusReason = "unsupported_lang"
-		res.Stderr = "ngôn ngữ compile không hỗ trợ: " + lang
-		res.ExitCode = 1
-		res.ErrorHits = 1
-		return res
+	switch spec.kind {
+	case kindDirect:
+		cmd, err := spec.build(filePath, buildDir)
+		if err != nil {
+			return failCompile(res, err.Error())
+		}
+		return execCapture(cmd, res, "")
+
+	case kindCompile:
+		// Bước 1: compile.
+		compileCmd, err := spec.build(filePath, buildDir)
+		if err != nil {
+			return failCompile(res, err.Error())
+		}
+		var compileOut bytes.Buffer
+		cc := exec.Command(compileCmd[0], compileCmd[1:]...)
+		cc.Stdout = &compileOut
+		cc.Stderr = &compileOut
+		if err := cc.Run(); err != nil {
+			res.Status = "error"
+			res.StatusReason = "compile_failed"
+			res.Stderr = compileOut.String()
+			res.ExitCode = 1
+			res.ErrorHits = 1
+			return res
+		}
+		// Bước 2: chạy binary/jar/exe.
+		runCmd, err := spec.runBuilt(filePath, buildDir)
+		if err != nil {
+			return failCompile(res, err.Error())
+		}
+		out := execCapture(runCmd, res, "")
+		// Dọn binary sau khi chạy.
+		_ = os.Remove(runCmd[0])
+		return out
+
+	case kindSpecial:
+		// awk và sqlite cần stdin đặc biệt.
+		code := ""
+		cmd, err := spec.build(filePath, buildDir)
+		if err != nil {
+			return failCompile(res, err.Error())
+		}
+		if lang == "sql" {
+			// Đọc file .sql vào stdin.
+			data, err := os.ReadFile(filePath)
+			if err != nil {
+				return failCompile(res, "không đọc được file .sql")
+			}
+			code = string(data)
+		}
+		return execCapture(cmd, res, code)
 	}
 
-	if _, err := exec.LookPath(compiler[0]); err != nil {
-		res.Status = "error"
-		res.StatusReason = "interpreter_not_found"
-		res.Stderr = fmt.Sprintf("không tìm thấy compiler %q", compiler[0])
-		res.ExitCode = 127
-		res.ErrorHits = 1
-		return res
-	}
-
-	// Compile.
-	compileCmd := exec.Command(compiler[0], compiler[1:]...)
-	var compileOut bytes.Buffer
-	compileCmd.Stdout = &compileOut
-	compileCmd.Stderr = &compileOut
-	if err := compileCmd.Run(); err != nil {
-		res.Status = "error"
-		res.StatusReason = "compile_failed"
-		res.Stderr = compileOut.String()
-		res.ExitCode = 1
-		res.ErrorHits = 1
-		return res
-	}
-
-	// Chạy binary vừa compile.
-	runRes := execCapture([]string{binPath}, res)
-
-	// Xoá binary sau khi chạy (dọn scratch).
-	_ = os.Remove(binPath)
-
-	return runRes
+	return res
 }
 
-// execCapture chạy cmd, capture stdout/stderr song song terminal, trả Result.
-func execCapture(cmd []string, res Result) Result {
+// failCompile trả Result lỗi với reason=compile_failed.
+func failCompile(res Result, msg string) Result {
+	res.Status = "error"
+	res.StatusReason = "compile_failed"
+	res.Stderr = msg
+	res.ExitCode = 1
+	res.ErrorHits = 1
+	return res
+}
+
+// execCapture chạy cmd, capture stdout/stderr song song terminal.
+// stdinData != "" thì feed vào stdin, ngược lại /dev/null (rỗng).
+func execCapture(cmd []string, res Result, stdinData string) Result {
 	var stdoutBuf, stderrBuf bytes.Buffer
 	c := exec.Command(cmd[0], cmd[1:]...)
-	c.Stdin = os.Stdin
+	if stdinData != "" {
+		c.Stdin = strings.NewReader(stdinData)
+	} else {
+		c.Stdin = os.Stdin
+	}
 	c.Stdout = io.MultiWriter(os.Stdout, &stdoutBuf)
 	c.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
 
@@ -165,51 +320,11 @@ func execCapture(cmd []string, res Result) Result {
 	return res
 }
 
-// countLines đếm số dòng của chuỗi, tính cả dòng cuối không có "\n".
+// countLines đếm số dòng (tính cả dòng cuối không có "\n").
 func countLines(s string) int {
 	if s == "" {
 		return 0
 	}
 	s = strings.TrimSuffix(s, "\n")
 	return strings.Count(s, "\n") + 1
-}
-
-// commandFor trả về mảng lệnh (interpreter + tham số) cho các ngôn ngữ
-// chạy trực tiếp. C/C++/Rust không đi qua đây (xử lý ở runCompiled).
-// Kotlin/Swift/SQL trả unsupported_lang — không có interpreter trên Termux.
-func commandFor(lang, filePath string) ([]string, error) {
-	switch lang {
-	case "go":
-		return []string{"go", "run", filePath}, nil
-	case "python":
-		return []string{"python3", filePath}, nil
-	case "javascript":
-		return []string{"node", filePath}, nil
-	case "typescript":
-		return []string{"deno", "run", filePath}, nil
-	case "ruby":
-		return []string{"ruby", filePath}, nil
-	case "perl":
-		return []string{"perl", filePath}, nil
-	case "php":
-		return []string{"php", filePath}, nil
-	case "lua":
-		return []string{"lua", filePath}, nil
-	case "bash":
-		return []string{"bash", filePath}, nil
-	case "zsh":
-		return []string{"zsh", filePath}, nil
-	case "sh":
-		return []string{"sh", filePath}, nil
-	case "deno":
-		return []string{"deno", "run", filePath}, nil
-	case "bun":
-		return []string{"bun", "run", filePath}, nil
-	case "java":
-		return []string{"java", filePath}, nil
-	case "kotlin", "swift", "sql":
-		return nil, fmt.Errorf("ngôn ngữ %q chưa có interpreter trên Termux; file vẫn được lưu", lang)
-	default:
-		return nil, fmt.Errorf("ngôn ngữ %q chưa được hỗ trợ", lang)
-	}
 }
